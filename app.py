@@ -233,6 +233,33 @@ def login():
     }), 200
 
 
+# STEP 11 - Doctor API
+@app.route("/api/doctors", methods=["GET"])
+def get_doctors():
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT id, name, specialization
+        FROM doctors
+        ORDER BY name
+    """)
+
+    doctors = cursor.fetchall()
+    conn.close()
+
+    doctor_list = []
+
+    for doctor in doctors:
+        doctor_list.append({
+            "id": doctor[0],
+            "name": doctor[1],
+            "specialty": doctor[2]
+        })
+
+    return jsonify(doctor_list), 200
+
+
 if __name__ == "__main__":
     create_database()
     app.run(debug=True)
