@@ -70,7 +70,7 @@ def create_database():
         )
     """)
 
-    # Add start_at and end_at if an older database does not have them
+    # Add start_at and end_at if they do not exist
     cursor.execute("PRAGMA table_info(appointments)")
     appointment_columns = [row["name"] for row in cursor.fetchall()]
 
@@ -125,9 +125,9 @@ def home():
     return "ClinicFlow is running!"
 
 
-# ---------------------------------------------------------
+# =========================================================
 # STEP 8 - USER REGISTRATION
-# ---------------------------------------------------------
+# =========================================================
 
 @app.route("/api/register", methods=["POST"])
 def register():
@@ -200,9 +200,9 @@ def register():
     }), 201
 
 
-# ---------------------------------------------------------
+# =========================================================
 # STEP 9 - USER LOGIN
-# ---------------------------------------------------------
+# =========================================================
 
 @app.route("/api/login", methods=["POST"])
 def login():
@@ -259,9 +259,9 @@ def login():
     }), 200
 
 
-# ---------------------------------------------------------
+# =========================================================
 # STEP 11 - GET DOCTORS
-# ---------------------------------------------------------
+# =========================================================
 
 @app.route("/api/doctors", methods=["GET"])
 def get_doctors():
@@ -293,9 +293,9 @@ def get_doctors():
     return jsonify(result), 200
 
 
-# ---------------------------------------------------------
+# =========================================================
 # STEP 12 - PATIENT SEARCH, PAGINATION AND SORTING
-# ---------------------------------------------------------
+# =========================================================
 
 @app.route("/api/patients", methods=["GET"])
 def get_patients():
@@ -424,9 +424,9 @@ def get_patients():
     }), 200
 
 
-# ---------------------------------------------------------
-# STEP 13 + STEP 14 - CREATE APPOINTMENT
-# ---------------------------------------------------------
+# =========================================================
+# STEP 13 + 14 + 15 - CREATE APPOINTMENT
+# =========================================================
 
 @app.route("/api/appointments", methods=["POST"])
 def create_appointment():
@@ -467,85 +467,85 @@ def create_appointment():
             "error": "Invalid date/time format. Use YYYY-MM-DDTHH:MM"
         }), 400
 
-    # End time must be after start time
+    # End must be after start
     if end_datetime <= start_datetime:
         return jsonify({
             "error": "end_at must be after start_at"
         }), 400
 
     conn = get_db_connection()
-    cursor = conn.cursor()
 
-    # Check doctor
-    cursor.execute(
-        "SELECT id, name FROM doctors WHERE id = ?",
-        (doctor_id,)
-    )
+    try:
+        # STEP 15:
+        # Start an SQLite write transaction immediately.
+        #
+        # This makes the CHECK + INSERT operation safer when
+        # multiple booking requests arrive at nearly the same time.
+        conn.execute("BEGIN IMMEDIATE")
 
-    doctor = cursor.fetchone()
+        cursor = conn.cursor()
 
-    if not doctor:
-        conn.close()
+        # -------------------------------------------------
+        # CHECK DOCTOR
+        # -------------------------------------------------
 
-        return jsonify({
-            "error": "Doctor not found"
-        }), 404
+        cursor.execute("""
+            SELECT id, name
+            FROM doctors
+            WHERE id = ?
+        """, (doctor_id,))
 
-    # -----------------------------------------------------
-    # STEP 14 - OVERLAPPING APPOINTMENT CHECK
-    #
-    # Existing appointment:
-    # existing_start < new_end
-    # AND
-    # existing_end > new_start
-    # -----------------------------------------------------
+        doctor = cursor.fetchone()
 
-    cursor.execute("""
-        SELECT id
-        FROM appointments
-        WHERE doctor_id = ?
-          AND status NOT IN ('Cancelled', 'Canceled')
-          AND start_at IS NOT NULL
-          AND end_at IS NOT NULL
-          AND start_at < ?
-          AND end_at > ?
-        LIMIT 1
-    """, (
-        doctor_id,
-        end_at,
-        start_at
-    ))
+        if not doctor:
+            conn.rollback()
 
-    conflict = cursor.fetchone()
+            return jsonify({
+                "error": "Doctor not found"
+            }), 404
 
-    if conflict:
-        conn.close()
+        # -------------------------------------------------
+        # STEP 14 - CHECK OVERLAPPING APPOINTMENT
+        #
+        # Existing start < new end
+        # AND
+        # Existing end > new start
+        # -------------------------------------------------
 
-        return jsonify({
-            "error": "This doctor already has an overlapping appointment"
-        }), 409
+        cursor.execute("""
+            SELECT id
+            FROM appointments
+            WHERE doctor_id = ?
+              AND status NOT IN ('Cancelled', 'Canceled')
+              AND start_at IS NOT NULL
+              AND end_at IS NOT NULL
+              AND start_at < ?
+              AND end_at > ?
+            LIMIT 1
+        """, (
+            doctor_id,
+            end_at,
+            start_at
+        ))
 
-    # -----------------------------------------------------
-    # FIND OR CREATE PATIENT
-    # -----------------------------------------------------
+        conflict = cursor.fetchone()
 
-    cursor.execute("""
-        SELECT id
-        FROM patients
-        WHERE email = ?
-    """, (patient_email,))
+        if conflict:
+            conn.rollback()
 
-    patient = cursor.fetchone()
+            return jsonify({
+                "error": "This doctor already has an overlapping appointment"
+            }), 409
 
-    if patient:
-        patient_id = patient["id"]
+        # -------------------------------------------------
+        # FIND PATIENT BY EMAIL
+        # -------------------------------------------------
 
-    else:
         cursor.execute("""
             SELECT id
             FROM patients
-            WHERE phone = ?
-        """, (patient_phone,))
+            WHERE email = ?
+        """, (patient_email,))
 
         patient = cursor.fetchone()
 
@@ -553,92 +553,125 @@ def create_appointment():
             patient_id = patient["id"]
 
         else:
+            # -------------------------------------------------
+            # FIND PATIENT BY PHONE
+            # -------------------------------------------------
+
             cursor.execute("""
-                INSERT INTO patients
-                (name, email, phone)
-                VALUES (?, ?, ?)
-            """, (
-                patient_name,
-                patient_email,
-                patient_phone
-            ))
+                SELECT id
+                FROM patients
+                WHERE phone = ?
+            """, (patient_phone,))
 
-            patient_id = cursor.lastrowid
+            patient = cursor.fetchone()
 
-    # -----------------------------------------------------
-    # CREATE APPOINTMENT
-    # -----------------------------------------------------
+            if patient:
+                patient_id = patient["id"]
 
-    appointment_date = start_datetime.strftime("%Y-%m-%d")
-    appointment_time = start_datetime.strftime("%H:%M")
+            else:
+                # -------------------------------------------------
+                # CREATE NEW PATIENT
+                # -------------------------------------------------
 
-    cursor.execute("""
-        INSERT INTO appointments
-        (
+                cursor.execute("""
+                    INSERT INTO patients
+                    (name, email, phone)
+                    VALUES (?, ?, ?)
+                """, (
+                    patient_name,
+                    patient_email,
+                    patient_phone
+                ))
+
+                patient_id = cursor.lastrowid
+
+        # -------------------------------------------------
+        # CREATE APPOINTMENT
+        # -------------------------------------------------
+
+        appointment_date = start_datetime.strftime("%Y-%m-%d")
+        appointment_time = start_datetime.strftime("%H:%M")
+
+        cursor.execute("""
+            INSERT INTO appointments
+            (
+                doctor_id,
+                patient_id,
+                appointment_date,
+                appointment_time,
+                status,
+                start_at,
+                end_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
             doctor_id,
             patient_id,
             appointment_date,
             appointment_time,
-            status,
+            "Pending",
             start_at,
             end_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        doctor_id,
-        patient_id,
-        appointment_date,
-        appointment_time,
-        "Pending",
-        start_at,
-        end_at
-    ))
+        ))
 
-    appointment_id = cursor.lastrowid
+        appointment_id = cursor.lastrowid
 
-    conn.commit()
+        # Commit transaction
+        conn.commit()
 
-    # Get created appointment
-    cursor.execute("""
-        SELECT
-            a.id,
-            a.doctor_id,
-            a.patient_id,
-            p.name AS patient_name,
-            p.phone AS patient_phone,
-            p.email AS patient_email,
-            a.start_at,
-            a.end_at,
-            a.status
-        FROM appointments a
-        JOIN patients p
-            ON a.patient_id = p.id
-        WHERE a.id = ?
-    """, (appointment_id,))
+        # -------------------------------------------------
+        # GET CREATED APPOINTMENT
+        # -------------------------------------------------
 
-    appointment = cursor.fetchone()
+        cursor.execute("""
+            SELECT
+                a.id,
+                a.doctor_id,
+                a.patient_id,
+                p.name AS patient_name,
+                p.phone AS patient_phone,
+                p.email AS patient_email,
+                a.start_at,
+                a.end_at,
+                a.status
+            FROM appointments a
+            JOIN patients p
+                ON a.patient_id = p.id
+            WHERE a.id = ?
+        """, (appointment_id,))
 
-    conn.close()
+        appointment = cursor.fetchone()
 
-    return jsonify({
-        "message": "Appointment booked successfully",
-        "appointment": {
-            "id": appointment["id"],
-            "doctor_id": appointment["doctor_id"],
-            "patient_id": appointment["patient_id"],
-            "patient_name": appointment["patient_name"],
-            "patient_phone": appointment["patient_phone"],
-            "patient_email": appointment["patient_email"],
-            "start_at": appointment["start_at"],
-            "end_at": appointment["end_at"],
-            "status": appointment["status"]
-        }
-    }), 201
+        return jsonify({
+            "message": "Appointment booked successfully",
+            "appointment": {
+                "id": appointment["id"],
+                "doctor_id": appointment["doctor_id"],
+                "patient_id": appointment["patient_id"],
+                "patient_name": appointment["patient_name"],
+                "patient_phone": appointment["patient_phone"],
+                "patient_email": appointment["patient_email"],
+                "start_at": appointment["start_at"],
+                "end_at": appointment["end_at"],
+                "status": appointment["status"]
+            }
+        }), 201
+
+    except sqlite3.Error as e:
+        conn.rollback()
+
+        return jsonify({
+            "error": "Database error",
+            "details": str(e)
+        }), 500
+
+    finally:
+        conn.close()
 
 
-# ---------------------------------------------------------
+# =========================================================
 # START APPLICATION
-# ---------------------------------------------------------
+# =========================================================
 
 if __name__ == "__main__":
     create_database()
