@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify, session, send_from_directory
 import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
@@ -28,10 +28,7 @@ def create_database():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # -----------------------------------------------------
     # USERS TABLE
-    # -----------------------------------------------------
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,10 +39,7 @@ def create_database():
         )
     """)
 
-    # -----------------------------------------------------
     # DOCTORS TABLE
-    # -----------------------------------------------------
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS doctors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,10 +50,7 @@ def create_database():
         )
     """)
 
-    # -----------------------------------------------------
     # PATIENTS TABLE
-    # -----------------------------------------------------
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS patients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,10 +62,7 @@ def create_database():
         )
     """)
 
-    # -----------------------------------------------------
     # APPOINTMENTS TABLE
-    # -----------------------------------------------------
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,10 +80,7 @@ def create_database():
         )
     """)
 
-    # -----------------------------------------------------
     # ADD NEW COLUMNS TO OLD DATABASE
-    # -----------------------------------------------------
-
     cursor.execute("PRAGMA table_info(appointments)")
 
     appointment_columns = [
@@ -122,10 +107,7 @@ def create_database():
             "ALTER TABLE appointments ADD COLUMN cancelled_at TEXT"
         )
 
-    # -----------------------------------------------------
     # SEED DOCTORS
-    # -----------------------------------------------------
-
     cursor.execute("SELECT COUNT(*) AS count FROM doctors")
 
     doctor_count = cursor.fetchone()["count"]
@@ -168,7 +150,7 @@ def create_database():
 
 @app.route("/")
 def home():
-    return "ClinicFlow is running!"
+    return send_from_directory("static", "index.html")
 
 
 # =========================================================
@@ -521,15 +503,11 @@ def create_appointment():
 
     try:
         # STEP 15 - CONCURRENCY SAFETY
-
         conn.execute("BEGIN IMMEDIATE")
 
         cursor = conn.cursor()
 
-        # -------------------------------------------------
         # CHECK DOCTOR
-        # -------------------------------------------------
-
         cursor.execute("""
             SELECT id, name
             FROM doctors
@@ -545,10 +523,7 @@ def create_appointment():
                 "error": "Doctor not found"
             }), 404
 
-        # -------------------------------------------------
         # STEP 14 - CHECK OVERLAPPING APPOINTMENT
-        # -------------------------------------------------
-
         cursor.execute("""
             SELECT id
             FROM appointments
@@ -574,10 +549,7 @@ def create_appointment():
                 "error": "This doctor already has an overlapping appointment"
             }), 409
 
-        # -------------------------------------------------
         # FIND PATIENT BY EMAIL
-        # -------------------------------------------------
-
         cursor.execute("""
             SELECT id
             FROM patients
@@ -590,10 +562,7 @@ def create_appointment():
             patient_id = patient["id"]
 
         else:
-            # -------------------------------------------------
             # FIND PATIENT BY PHONE
-            # -------------------------------------------------
-
             cursor.execute("""
                 SELECT id
                 FROM patients
@@ -606,10 +575,7 @@ def create_appointment():
                 patient_id = patient["id"]
 
             else:
-                # -------------------------------------------------
                 # CREATE NEW PATIENT
-                # -------------------------------------------------
-
                 cursor.execute("""
                     INSERT INTO patients
                     (name, email, phone)
@@ -622,10 +588,7 @@ def create_appointment():
 
                 patient_id = cursor.lastrowid
 
-        # -------------------------------------------------
         # CREATE APPOINTMENT
-        # -------------------------------------------------
-
         appointment_date = start_datetime.strftime("%Y-%m-%d")
         appointment_time = start_datetime.strftime("%H:%M")
 
@@ -659,10 +622,7 @@ def create_appointment():
 
         conn.commit()
 
-        # -------------------------------------------------
         # GET CREATED APPOINTMENT
-        # -------------------------------------------------
-
         cursor.execute("""
             SELECT
                 a.id,
@@ -847,10 +807,7 @@ def list_appointments():
     conn = get_db_connection()
 
     try:
-        # -------------------------------------------------
         # MAIN APPOINTMENT QUERY
-        # -------------------------------------------------
-
         query = """
             SELECT
                 a.id,
@@ -878,18 +835,12 @@ def list_appointments():
 
         params = []
 
-        # -------------------------------------------------
         # FILTER BY DATE
-        # -------------------------------------------------
-
         if date:
             query += " AND a.appointment_date = ?"
             params.append(date)
 
-        # -------------------------------------------------
         # FILTER BY DOCTOR
-        # -------------------------------------------------
-
         if doctor_id:
             try:
                 doctor_id = int(doctor_id)
@@ -903,10 +854,7 @@ def list_appointments():
             query += " AND a.doctor_id = ?"
             params.append(doctor_id)
 
-        # -------------------------------------------------
         # SEARCH PATIENT
-        # -------------------------------------------------
-
         if patient:
             query += """
                 AND (
@@ -924,28 +872,19 @@ def list_appointments():
                 patient_search
             ])
 
-        # -------------------------------------------------
         # FILTER BY STATUS
-        # -------------------------------------------------
-
         if status:
             query += " AND a.status = ?"
             params.append(status)
 
-        # -------------------------------------------------
         # SORTING
-        # -------------------------------------------------
-
         query += (
             f" ORDER BY "
             f"{allowed_sort_fields[sort]} "
             f"{order.upper()}"
         )
 
-        # -------------------------------------------------
         # PAGINATION
-        # -------------------------------------------------
-
         offset = (page - 1) * limit
 
         query += " LIMIT ? OFFSET ?"
@@ -960,10 +899,7 @@ def list_appointments():
             params
         ).fetchall()
 
-        # -------------------------------------------------
         # COUNT TOTAL RESULTS
-        # -------------------------------------------------
-
         count_query = """
             SELECT COUNT(*)
             FROM appointments a
@@ -1010,10 +946,7 @@ def list_appointments():
             count_params
         ).fetchone()[0]
 
-        # -------------------------------------------------
         # FORMAT RESPONSE
-        # -------------------------------------------------
-
         appointments = []
 
         for row in rows:
