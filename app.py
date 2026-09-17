@@ -1,8 +1,11 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session
 import sqlite3
-from werkzeug.security import generate_password_hash
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
+
+# Secret key for Flask sessions
+app.secret_key = "clinicflow-development-secret"
 
 DATABASE = "clinic.db"
 
@@ -166,6 +169,68 @@ def register():
     return jsonify({
         "message": "Registration successful"
     }), 201
+
+
+# STEP 9 - Login
+@app.route("/api/login", methods=["POST"])
+def login():
+    data = request.get_json()
+
+    if not data:
+        return jsonify({
+            "error": "Request body is required"
+        }), 400
+
+    email = data.get("email")
+    password = data.get("password")
+
+    # Check required fields
+    if not email or not password:
+        return jsonify({
+            "error": "Email and password are required"
+        }), 400
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    # Find user by email
+    cursor.execute("""
+        SELECT id, name, email, password, role
+        FROM users
+        WHERE email = ?
+    """, (email,))
+
+    user = cursor.fetchone()
+    conn.close()
+
+    # User does not exist
+    if not user:
+        return jsonify({
+            "error": "Invalid email or password"
+        }), 401
+
+    user_id, name, user_email, password_hash, role = user
+
+    # Check password against stored hash
+    if not check_password_hash(password_hash, password):
+        return jsonify({
+            "error": "Invalid email or password"
+        }), 401
+
+    # Create login session
+    session["user_id"] = user_id
+    session["user_name"] = name
+    session["user_role"] = role
+
+    return jsonify({
+        "message": "Login successful",
+        "user": {
+            "id": user_id,
+            "name": name,
+            "email": user_email,
+            "role": role
+        }
+    }), 200
 
 
 if __name__ == "__main__":
