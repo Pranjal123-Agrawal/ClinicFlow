@@ -58,6 +58,38 @@ def create_database():
         )
     """)
 
+    # Add sample doctors only if the table is empty
+    cursor.execute("SELECT COUNT(*) FROM doctors")
+    doctor_count = cursor.fetchone()[0]
+
+    if doctor_count == 0:
+        doctors = [
+            (
+                "Dr. Aisha Sharma",
+                "General Medicine",
+                "aisha@clinic.com",
+                "9876543210"
+            ),
+            (
+                "Dr. Rahul Mehta",
+                "Dermatology",
+                "rahul@clinic.com",
+                "9876543211"
+            ),
+            (
+                "Dr. Neha Kapoor",
+                "Pediatrics",
+                "neha@clinic.com",
+                "9876543212"
+            )
+        ]
+
+        cursor.executemany("""
+            INSERT INTO doctors
+            (name, specialization, email, phone)
+            VALUES (?, ?, ?, ?)
+        """, doctors)
+
     conn.commit()
     conn.close()
 
