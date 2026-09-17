@@ -1,4 +1,3 @@
-
 from flask import Flask, request, jsonify, session
 import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -98,6 +97,7 @@ def create_database():
     # -----------------------------------------------------
 
     cursor.execute("PRAGMA table_info(appointments)")
+
     appointment_columns = [
         row["name"] for row in cursor.fetchall()
     ]
@@ -127,6 +127,7 @@ def create_database():
     # -----------------------------------------------------
 
     cursor.execute("SELECT COUNT(*) AS count FROM doctors")
+
     doctor_count = cursor.fetchone()["count"]
 
     if doctor_count == 0:
@@ -503,7 +504,6 @@ def create_appointment():
             "error": "All appointment fields are required"
         }), 400
 
-    # Validate date/time
     try:
         start_datetime = datetime.fromisoformat(start_at)
         end_datetime = datetime.fromisoformat(end_at)
@@ -512,7 +512,6 @@ def create_appointment():
             "error": "Invalid date/time format. Use YYYY-MM-DDTHH:MM"
         }), 400
 
-    # End must be after start
     if end_datetime <= start_datetime:
         return jsonify({
             "error": "end_at must be after start_at"
@@ -521,9 +520,7 @@ def create_appointment():
     conn = get_db_connection()
 
     try:
-        # -------------------------------------------------
         # STEP 15 - CONCURRENCY SAFETY
-        # -------------------------------------------------
 
         conn.execute("BEGIN IMMEDIATE")
 
@@ -550,10 +547,6 @@ def create_appointment():
 
         # -------------------------------------------------
         # STEP 14 - CHECK OVERLAPPING APPOINTMENT
-        #
-        # Existing start < new end
-        # AND
-        # Existing end > new start
         # -------------------------------------------------
 
         cursor.execute("""
@@ -726,10 +719,6 @@ def cancel_appointment(appointment_id):
     cursor = conn.cursor()
 
     try:
-        # -------------------------------------------------
-        # FIND APPOINTMENT
-        # -------------------------------------------------
-
         cursor.execute("""
             SELECT
                 id,
@@ -746,18 +735,10 @@ def cancel_appointment(appointment_id):
                 "error": "Appointment not found"
             }), 404
 
-        # -------------------------------------------------
-        # CHECK ALREADY CANCELLED
-        # -------------------------------------------------
-
         if appointment["status"] in ("Cancelled", "Canceled"):
             return jsonify({
                 "error": "Appointment is already cancelled"
             }), 400
-
-        # -------------------------------------------------
-        # CALCULATE TIME REMAINING
-        # -------------------------------------------------
 
         if not appointment["start_at"]:
             return jsonify({
@@ -774,12 +755,8 @@ def cancel_appointment(appointment_id):
             appointment_start - current_time
         ).total_seconds() / 3600
 
-        # -------------------------------------------------
-        # FAIR CANCELLATION FEE
-        #
         # 24 hours or more -> ₹0
         # Less than 24 hours -> ₹200
-        # -------------------------------------------------
 
         if hours_remaining >= 24:
             cancellation_fee = 0
@@ -787,10 +764,6 @@ def cancel_appointment(appointment_id):
             cancellation_fee = 200
 
         cancelled_at = current_time.isoformat()
-
-        # -------------------------------------------------
-        # UPDATE APPOINTMENT
-        # -------------------------------------------------
 
         cursor.execute("""
             UPDATE appointments
@@ -818,6 +791,263 @@ def cancel_appointment(appointment_id):
     except sqlite3.Error as e:
         conn.rollback()
 
+        return jsonify({
+            "error": "Database error",
+            "details": str(e)
+        }), 500
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# STEP 19 - APPOINTMENT LISTING
+# =========================================================
+
+@app.route("/api/appointments", methods=["GET"])
+def list_appointments():
+    date = request.args.get("date")
+    doctor_id = request.args.get("doctor_id")
+    patient = request.args.get("patient")
+    status = request.args.get("status")
+
+    try:
+        page = max(int(request.args.get("page", 1)), 1)
+        limit = min(
+            max(int(request.args.get("limit", 10)), 1),
+            100
+        )
+    except ValueError:
+        return jsonify({
+            "error": "page and limit must be integers"
+        }), 400
+
+    sort = request.args.get("sort", "start_at")
+    order = request.args.get("order", "asc").lower()
+
+    allowed_sort_fields = {
+        "id": "a.id",
+        "start_at": "a.start_at",
+        "end_at": "a.end_at",
+        "status": "a.status",
+        "doctor": "d.name",
+        "patient": "p.name"
+    }
+
+    if sort not in allowed_sort_fields:
+        return jsonify({
+            "error": "Invalid sort field"
+        }), 400
+
+    if order not in ("asc", "desc"):
+        return jsonify({
+            "error": "order must be asc or desc"
+        }), 400
+
+    conn = get_db_connection()
+
+    try:
+        # -------------------------------------------------
+        # MAIN APPOINTMENT QUERY
+        # -------------------------------------------------
+
+        query = """
+            SELECT
+                a.id,
+                a.doctor_id,
+                d.name AS doctor_name,
+                d.specialization,
+                a.patient_id,
+                p.name AS patient_name,
+                p.phone AS patient_phone,
+                p.email AS patient_email,
+                a.appointment_date,
+                a.appointment_time,
+                a.start_at,
+                a.end_at,
+                a.status,
+                a.cancellation_fee,
+                a.cancelled_at
+            FROM appointments a
+            JOIN doctors d
+                ON a.doctor_id = d.id
+            JOIN patients p
+                ON a.patient_id = p.id
+            WHERE 1=1
+        """
+
+        params = []
+
+        # -------------------------------------------------
+        # FILTER BY DATE
+        # -------------------------------------------------
+
+        if date:
+            query += " AND a.appointment_date = ?"
+            params.append(date)
+
+        # -------------------------------------------------
+        # FILTER BY DOCTOR
+        # -------------------------------------------------
+
+        if doctor_id:
+            try:
+                doctor_id = int(doctor_id)
+            except ValueError:
+                conn.close()
+
+                return jsonify({
+                    "error": "doctor_id must be an integer"
+                }), 400
+
+            query += " AND a.doctor_id = ?"
+            params.append(doctor_id)
+
+        # -------------------------------------------------
+        # SEARCH PATIENT
+        # -------------------------------------------------
+
+        if patient:
+            query += """
+                AND (
+                    p.name LIKE ?
+                    OR p.phone LIKE ?
+                    OR p.email LIKE ?
+                )
+            """
+
+            patient_search = f"%{patient}%"
+
+            params.extend([
+                patient_search,
+                patient_search,
+                patient_search
+            ])
+
+        # -------------------------------------------------
+        # FILTER BY STATUS
+        # -------------------------------------------------
+
+        if status:
+            query += " AND a.status = ?"
+            params.append(status)
+
+        # -------------------------------------------------
+        # SORTING
+        # -------------------------------------------------
+
+        query += (
+            f" ORDER BY "
+            f"{allowed_sort_fields[sort]} "
+            f"{order.upper()}"
+        )
+
+        # -------------------------------------------------
+        # PAGINATION
+        # -------------------------------------------------
+
+        offset = (page - 1) * limit
+
+        query += " LIMIT ? OFFSET ?"
+
+        params.extend([
+            limit,
+            offset
+        ])
+
+        rows = conn.execute(
+            query,
+            params
+        ).fetchall()
+
+        # -------------------------------------------------
+        # COUNT TOTAL RESULTS
+        # -------------------------------------------------
+
+        count_query = """
+            SELECT COUNT(*)
+            FROM appointments a
+            JOIN doctors d
+                ON a.doctor_id = d.id
+            JOIN patients p
+                ON a.patient_id = p.id
+            WHERE 1=1
+        """
+
+        count_params = []
+
+        if date:
+            count_query += " AND a.appointment_date = ?"
+            count_params.append(date)
+
+        if doctor_id:
+            count_query += " AND a.doctor_id = ?"
+            count_params.append(doctor_id)
+
+        if patient:
+            count_query += """
+                AND (
+                    p.name LIKE ?
+                    OR p.phone LIKE ?
+                    OR p.email LIKE ?
+                )
+            """
+
+            patient_search = f"%{patient}%"
+
+            count_params.extend([
+                patient_search,
+                patient_search,
+                patient_search
+            ])
+
+        if status:
+            count_query += " AND a.status = ?"
+            count_params.append(status)
+
+        total = conn.execute(
+            count_query,
+            count_params
+        ).fetchone()[0]
+
+        # -------------------------------------------------
+        # FORMAT RESPONSE
+        # -------------------------------------------------
+
+        appointments = []
+
+        for row in rows:
+            appointments.append({
+                "id": row["id"],
+                "doctor_id": row["doctor_id"],
+                "doctor_name": row["doctor_name"],
+                "specialization": row["specialization"],
+                "patient_id": row["patient_id"],
+                "patient_name": row["patient_name"],
+                "patient_phone": row["patient_phone"],
+                "patient_email": row["patient_email"],
+                "appointment_date": row["appointment_date"],
+                "appointment_time": row["appointment_time"],
+                "start_at": row["start_at"],
+                "end_at": row["end_at"],
+                "status": row["status"],
+                "cancellation_fee": row["cancellation_fee"],
+                "cancelled_at": row["cancelled_at"]
+            })
+
+        total_pages = (total + limit - 1) // limit
+
+        return jsonify({
+            "appointments": appointments,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "total_pages": total_pages
+            }
+        }), 200
+
+    except sqlite3.Error as e:
         return jsonify({
             "error": "Database error",
             "details": str(e)
