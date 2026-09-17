@@ -1,5 +1,6 @@
-from flask import Flask
+from flask import Flask, request, jsonify
 import sqlite3
+from werkzeug.security import generate_password_hash
 
 app = Flask(__name__)
 
@@ -99,6 +100,72 @@ def create_database():
 @app.route("/")
 def home():
     return "ClinicFlow is running!"
+
+
+# STEP 8 - Registration
+@app.route("/api/register", methods=["POST"])
+def register():
+    data = request.get_json()
+
+    if not data:
+        return jsonify({
+            "error": "Request body is required"
+        }), 400
+
+    name = data.get("name")
+    email = data.get("email")
+    password = data.get("password")
+
+    # Check required fields
+    if not name or not email or not password:
+        return jsonify({
+            "error": "Name, email and password are required"
+        }), 400
+
+    # Check password length
+    if len(password) < 6:
+        return jsonify({
+            "error": "Password must be at least 6 characters"
+        }), 400
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    # Check if email already exists
+    cursor.execute(
+        "SELECT id FROM users WHERE email = ?",
+        (email,)
+    )
+
+    existing_user = cursor.fetchone()
+
+    if existing_user:
+        conn.close()
+
+        return jsonify({
+            "error": "Email already registered"
+        }), 409
+
+    # Hash password before storing it
+    password_hash = generate_password_hash(password)
+
+    # Insert user
+    cursor.execute("""
+        INSERT INTO users (name, email, password, role)
+        VALUES (?, ?, ?, ?)
+    """, (
+        name,
+        email,
+        password_hash,
+        "staff"
+    ))
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "message": "Registration successful"
+    }), 201
 
 
 if __name__ == "__main__":
