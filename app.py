@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, session
 import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -61,6 +62,24 @@ def create_database():
             FOREIGN KEY (patient_id) REFERENCES patients(id)
         )
     """)
+
+    # Add start_at and end_at columns for STEP 13
+    cursor.execute("PRAGMA table_info(appointments)")
+    appointment_columns = [
+        column[1] for column in cursor.fetchall()
+    ]
+
+    if "start_at" not in appointment_columns:
+        cursor.execute("""
+            ALTER TABLE appointments
+            ADD COLUMN start_at TEXT
+        """)
+
+    if "end_at" not in appointment_columns:
+        cursor.execute("""
+            ALTER TABLE appointments
+            ADD COLUMN end_at TEXT
+        """)
 
     # Add sample doctors only if table is empty
     cursor.execute("SELECT COUNT(*) FROM doctors")
@@ -254,22 +273,18 @@ def get_doctors():
 @app.route("/api/patients", methods=["GET"])
 def get_patients():
 
-    # Get query parameters
     q = request.args.get("q", "").strip()
     page = request.args.get("page", 1, type=int)
     limit = request.args.get("limit", 10, type=int)
     sort = request.args.get("sort", "name")
     order = request.args.get("order", "asc").lower()
 
-    # Validate page
     if page < 1:
         page = 1
 
-    # Validate limit
     if limit < 1:
         limit = 10
 
-    # Allowed sorting columns
     allowed_sort_columns = {
         "name": "name",
         "age": "age",
@@ -278,16 +293,12 @@ def get_patients():
         "phone": "phone"
     }
 
-    # If invalid sort is provided, use name
     sort_column = allowed_sort_columns.get(sort, "name")
-
-    # Only allow ASC or DESC
     sort_order = "DESC" if order == "desc" else "ASC"
 
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
 
-    # Search
     search_condition = ""
     search_value = f"%{q}%"
 
@@ -298,7 +309,6 @@ def get_patients():
                OR phone LIKE ?
         """
 
-    # Count total matching patients
     if q:
         cursor.execute(
             f"""
@@ -320,10 +330,8 @@ def get_patients():
 
     total = cursor.fetchone()[0]
 
-    # Calculate offset
     offset = (page - 1) * limit
 
-    # Get patients
     query = f"""
         SELECT id, name, age, gender, email, phone
         FROM patients
@@ -355,7 +363,6 @@ def get_patients():
     patients = cursor.fetchall()
     conn.close()
 
-    # Convert database rows to JSON
     patient_list = []
 
     for patient in patients:
@@ -368,7 +375,6 @@ def get_patients():
             "phone": patient[5]
         })
 
-    # Calculate total pages
     total_pages = (total + limit - 1) // limit
 
     return jsonify({
@@ -380,6 +386,155 @@ def get_patients():
             "total_pages": total_pages
         }
     }), 200
+
+
+# STEP 13 - Appointment Booking
+@app.route("/api/appointments", methods=["POST"])
+def create_appointment():
+    data = request.get_json()
+
+    if not data:
+        return jsonify({
+            "error": "Request body is required"
+        }), 400
+
+    doctor_id = data.get("doctor_id")
+    patient_name = data.get("patient_name")
+    patient_phone = data.get("patient_phone")
+    patient_email = data.get("patient_email")
+    start_at = data.get("start_at")
+    end_at = data.get("end_at")
+
+    # Required fields
+    if not doctor_id or not patient_name or not patient_phone:
+        return jsonify({
+            "error": "doctor_id, patient_name and patient_phone are required"
+        }), 400
+
+    if not start_at or not end_at:
+        return jsonify({
+            "error": "start_at and end_at are required"
+        }), 400
+
+    # Validate date/time
+    try:
+        start_datetime = datetime.fromisoformat(start_at)
+        end_datetime = datetime.fromisoformat(end_at)
+    except ValueError:
+        return jsonify({
+            "error": "Invalid date/time format. Use YYYY-MM-DDTHH:MM"
+        }), 400
+
+    # End must be after start
+    if end_datetime <= start_datetime:
+        return jsonify({
+            "error": "end_at must be after start_at"
+        }), 400
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    # Check doctor
+    cursor.execute("""
+        SELECT id, name, specialization
+        FROM doctors
+        WHERE id = ?
+    """, (doctor_id,))
+
+    doctor = cursor.fetchone()
+
+    if not doctor:
+        conn.close()
+
+        return jsonify({
+            "error": "Doctor not found"
+        }), 404
+
+    # Find patient by email
+    patient = None
+
+    if patient_email:
+        cursor.execute("""
+            SELECT id, name, phone, email
+            FROM patients
+            WHERE email = ?
+        """, (patient_email,))
+
+        patient = cursor.fetchone()
+
+    # If not found, find by phone
+    if not patient:
+        cursor.execute("""
+            SELECT id, name, phone, email
+            FROM patients
+            WHERE phone = ?
+        """, (patient_phone,))
+
+        patient = cursor.fetchone()
+
+    # Create patient if not found
+    if not patient:
+        cursor.execute("""
+            INSERT INTO patients
+            (name, phone, email)
+            VALUES (?, ?, ?)
+        """, (
+            patient_name,
+            patient_phone,
+            patient_email
+        ))
+
+        patient_id = cursor.lastrowid
+
+    else:
+        patient_id = patient[0]
+
+    # Store date/time in existing columns too
+    appointment_date = start_datetime.strftime("%Y-%m-%d")
+    appointment_time = start_datetime.strftime("%H:%M")
+
+    # Insert appointment
+    cursor.execute("""
+        INSERT INTO appointments
+        (
+            doctor_id,
+            patient_id,
+            appointment_date,
+            appointment_time,
+            status,
+            start_at,
+            end_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        doctor_id,
+        patient_id,
+        appointment_date,
+        appointment_time,
+        "Pending",
+        start_at,
+        end_at
+    ))
+
+    appointment_id = cursor.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "message": "Appointment booked successfully",
+        "appointment": {
+            "id": appointment_id,
+            "doctor_id": doctor_id,
+            "patient_id": patient_id,
+            "patient_name": patient_name,
+            "patient_phone": patient_phone,
+            "patient_email": patient_email,
+            "start_at": start_at,
+            "end_at": end_at,
+            "status": "Pending"
+        }
+    }), 201
 
 
 if __name__ == "__main__":
