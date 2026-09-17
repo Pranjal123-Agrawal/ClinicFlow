@@ -1,14 +1,19 @@
+
 from flask import Flask, request, jsonify, session
 import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
 
-
 app = Flask(__name__)
+
 app.secret_key = "clinicflow-development-secret"
 
 DATABASE = "clinic.db"
 
+
+# =========================================================
+# DATABASE CONNECTION
+# =========================================================
 
 def get_db_connection():
     conn = sqlite3.connect(DATABASE)
@@ -16,11 +21,18 @@ def get_db_connection():
     return conn
 
 
+# =========================================================
+# CREATE DATABASE
+# =========================================================
+
 def create_database():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Users table
+    # -----------------------------------------------------
+    # USERS TABLE
+    # -----------------------------------------------------
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,7 +43,10 @@ def create_database():
         )
     """)
 
-    # Doctors table
+    # -----------------------------------------------------
+    # DOCTORS TABLE
+    # -----------------------------------------------------
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS doctors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +57,10 @@ def create_database():
         )
     """)
 
-    # Patients table
+    # -----------------------------------------------------
+    # PATIENTS TABLE
+    # -----------------------------------------------------
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS patients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,7 +72,10 @@ def create_database():
         )
     """)
 
-    # Appointments table
+    # -----------------------------------------------------
+    # APPOINTMENTS TABLE
+    # -----------------------------------------------------
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,14 +86,21 @@ def create_database():
             status TEXT DEFAULT 'Pending',
             start_at TEXT,
             end_at TEXT,
+            cancellation_fee INTEGER DEFAULT 0,
+            cancelled_at TEXT,
             FOREIGN KEY (doctor_id) REFERENCES doctors(id),
             FOREIGN KEY (patient_id) REFERENCES patients(id)
         )
     """)
 
-    # Add start_at and end_at if they do not exist
+    # -----------------------------------------------------
+    # ADD NEW COLUMNS TO OLD DATABASE
+    # -----------------------------------------------------
+
     cursor.execute("PRAGMA table_info(appointments)")
-    appointment_columns = [row["name"] for row in cursor.fetchall()]
+    appointment_columns = [
+        row["name"] for row in cursor.fetchall()
+    ]
 
     if "start_at" not in appointment_columns:
         cursor.execute(
@@ -84,7 +112,20 @@ def create_database():
             "ALTER TABLE appointments ADD COLUMN end_at TEXT"
         )
 
-    # Seed doctors
+    if "cancellation_fee" not in appointment_columns:
+        cursor.execute(
+            "ALTER TABLE appointments ADD COLUMN cancellation_fee INTEGER DEFAULT 0"
+        )
+
+    if "cancelled_at" not in appointment_columns:
+        cursor.execute(
+            "ALTER TABLE appointments ADD COLUMN cancelled_at TEXT"
+        )
+
+    # -----------------------------------------------------
+    # SEED DOCTORS
+    # -----------------------------------------------------
+
     cursor.execute("SELECT COUNT(*) AS count FROM doctors")
     doctor_count = cursor.fetchone()["count"]
 
@@ -119,6 +160,10 @@ def create_database():
     conn.commit()
     conn.close()
 
+
+# =========================================================
+# HOME
+# =========================================================
 
 @app.route("/")
 def home():
@@ -458,7 +503,7 @@ def create_appointment():
             "error": "All appointment fields are required"
         }), 400
 
-    # Validate date/time format
+    # Validate date/time
     try:
         start_datetime = datetime.fromisoformat(start_at)
         end_datetime = datetime.fromisoformat(end_at)
@@ -476,11 +521,10 @@ def create_appointment():
     conn = get_db_connection()
 
     try:
-        # STEP 15:
-        # Start an SQLite write transaction immediately.
-        #
-        # This makes the CHECK + INSERT operation safer when
-        # multiple booking requests arrive at nearly the same time.
+        # -------------------------------------------------
+        # STEP 15 - CONCURRENCY SAFETY
+        # -------------------------------------------------
+
         conn.execute("BEGIN IMMEDIATE")
 
         cursor = conn.cursor()
@@ -601,9 +645,11 @@ def create_appointment():
                 appointment_time,
                 status,
                 start_at,
-                end_at
+                end_at,
+                cancellation_fee,
+                cancelled_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             doctor_id,
             patient_id,
@@ -611,12 +657,13 @@ def create_appointment():
             appointment_time,
             "Pending",
             start_at,
-            end_at
+            end_at,
+            0,
+            None
         ))
 
         appointment_id = cursor.lastrowid
 
-        # Commit transaction
         conn.commit()
 
         # -------------------------------------------------
@@ -656,6 +703,117 @@ def create_appointment():
                 "status": appointment["status"]
             }
         }), 201
+
+    except sqlite3.Error as e:
+        conn.rollback()
+
+        return jsonify({
+            "error": "Database error",
+            "details": str(e)
+        }), 500
+
+    finally:
+        conn.close()
+
+
+# =========================================================
+# STEP 17 - CANCEL APPOINTMENT
+# =========================================================
+
+@app.route("/api/appointments/<int:appointment_id>/cancel", methods=["POST"])
+def cancel_appointment(appointment_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        # -------------------------------------------------
+        # FIND APPOINTMENT
+        # -------------------------------------------------
+
+        cursor.execute("""
+            SELECT
+                id,
+                start_at,
+                status
+            FROM appointments
+            WHERE id = ?
+        """, (appointment_id,))
+
+        appointment = cursor.fetchone()
+
+        if not appointment:
+            return jsonify({
+                "error": "Appointment not found"
+            }), 404
+
+        # -------------------------------------------------
+        # CHECK ALREADY CANCELLED
+        # -------------------------------------------------
+
+        if appointment["status"] in ("Cancelled", "Canceled"):
+            return jsonify({
+                "error": "Appointment is already cancelled"
+            }), 400
+
+        # -------------------------------------------------
+        # CALCULATE TIME REMAINING
+        # -------------------------------------------------
+
+        if not appointment["start_at"]:
+            return jsonify({
+                "error": "Appointment start time is missing"
+            }), 400
+
+        appointment_start = datetime.fromisoformat(
+            appointment["start_at"]
+        )
+
+        current_time = datetime.now()
+
+        hours_remaining = (
+            appointment_start - current_time
+        ).total_seconds() / 3600
+
+        # -------------------------------------------------
+        # FAIR CANCELLATION FEE
+        #
+        # 24 hours or more -> ₹0
+        # Less than 24 hours -> ₹200
+        # -------------------------------------------------
+
+        if hours_remaining >= 24:
+            cancellation_fee = 0
+        else:
+            cancellation_fee = 200
+
+        cancelled_at = current_time.isoformat()
+
+        # -------------------------------------------------
+        # UPDATE APPOINTMENT
+        # -------------------------------------------------
+
+        cursor.execute("""
+            UPDATE appointments
+            SET
+                status = 'Cancelled',
+                cancellation_fee = ?,
+                cancelled_at = ?
+            WHERE id = ?
+        """, (
+            cancellation_fee,
+            cancelled_at,
+            appointment_id
+        ))
+
+        conn.commit()
+
+        return jsonify({
+            "message": "Appointment cancelled successfully",
+            "appointment_id": appointment_id,
+            "status": "Cancelled",
+            "cancellation_fee": cancellation_fee,
+            "cancelled_at": cancelled_at
+        }), 200
 
     except sqlite3.Error as e:
         conn.rollback()
