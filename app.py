@@ -62,7 +62,7 @@ def create_database():
         )
     """)
 
-    # Add sample doctors only if the table is empty
+    # Add sample doctors only if table is empty
     cursor.execute("SELECT COUNT(*) FROM doctors")
     doctor_count = cursor.fetchone()[0]
 
@@ -119,13 +119,11 @@ def register():
     email = data.get("email")
     password = data.get("password")
 
-    # Check required fields
     if not name or not email or not password:
         return jsonify({
             "error": "Name, email and password are required"
         }), 400
 
-    # Check password length
     if len(password) < 6:
         return jsonify({
             "error": "Password must be at least 6 characters"
@@ -134,7 +132,6 @@ def register():
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
 
-    # Check if email already exists
     cursor.execute(
         "SELECT id FROM users WHERE email = ?",
         (email,)
@@ -149,10 +146,8 @@ def register():
             "error": "Email already registered"
         }), 409
 
-    # Hash password before storing it
     password_hash = generate_password_hash(password)
 
-    # Insert user
     cursor.execute("""
         INSERT INTO users (name, email, password, role)
         VALUES (?, ?, ?, ?)
@@ -184,7 +179,6 @@ def login():
     email = data.get("email")
     password = data.get("password")
 
-    # Check required fields
     if not email or not password:
         return jsonify({
             "error": "Email and password are required"
@@ -193,7 +187,6 @@ def login():
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
 
-    # Find user by email
     cursor.execute("""
         SELECT id, name, email, password, role
         FROM users
@@ -203,7 +196,6 @@ def login():
     user = cursor.fetchone()
     conn.close()
 
-    # User does not exist
     if not user:
         return jsonify({
             "error": "Invalid email or password"
@@ -211,13 +203,11 @@ def login():
 
     user_id, name, user_email, password_hash, role = user
 
-    # Check password against stored hash
     if not check_password_hash(password_hash, password):
         return jsonify({
             "error": "Invalid email or password"
         }), 401
 
-    # Create login session
     session["user_id"] = user_id
     session["user_name"] = name
     session["user_role"] = role
@@ -258,6 +248,138 @@ def get_doctors():
         })
 
     return jsonify(doctor_list), 200
+
+
+# STEP 12 - Patient API
+@app.route("/api/patients", methods=["GET"])
+def get_patients():
+
+    # Get query parameters
+    q = request.args.get("q", "").strip()
+    page = request.args.get("page", 1, type=int)
+    limit = request.args.get("limit", 10, type=int)
+    sort = request.args.get("sort", "name")
+    order = request.args.get("order", "asc").lower()
+
+    # Validate page
+    if page < 1:
+        page = 1
+
+    # Validate limit
+    if limit < 1:
+        limit = 10
+
+    # Allowed sorting columns
+    allowed_sort_columns = {
+        "name": "name",
+        "age": "age",
+        "gender": "gender",
+        "email": "email",
+        "phone": "phone"
+    }
+
+    # If invalid sort is provided, use name
+    sort_column = allowed_sort_columns.get(sort, "name")
+
+    # Only allow ASC or DESC
+    sort_order = "DESC" if order == "desc" else "ASC"
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    # Search
+    search_condition = ""
+    search_value = f"%{q}%"
+
+    if q:
+        search_condition = """
+            WHERE name LIKE ?
+               OR email LIKE ?
+               OR phone LIKE ?
+        """
+
+    # Count total matching patients
+    if q:
+        cursor.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM patients
+            {search_condition}
+            """,
+            (
+                search_value,
+                search_value,
+                search_value
+            )
+        )
+    else:
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM patients
+        """)
+
+    total = cursor.fetchone()[0]
+
+    # Calculate offset
+    offset = (page - 1) * limit
+
+    # Get patients
+    query = f"""
+        SELECT id, name, age, gender, email, phone
+        FROM patients
+        {search_condition}
+        ORDER BY {sort_column} {sort_order}
+        LIMIT ? OFFSET ?
+    """
+
+    if q:
+        cursor.execute(
+            query,
+            (
+                search_value,
+                search_value,
+                search_value,
+                limit,
+                offset
+            )
+        )
+    else:
+        cursor.execute(
+            query,
+            (
+                limit,
+                offset
+            )
+        )
+
+    patients = cursor.fetchall()
+    conn.close()
+
+    # Convert database rows to JSON
+    patient_list = []
+
+    for patient in patients:
+        patient_list.append({
+            "id": patient[0],
+            "name": patient[1],
+            "age": patient[2],
+            "gender": patient[3],
+            "email": patient[4],
+            "phone": patient[5]
+        })
+
+    # Calculate total pages
+    total_pages = (total + limit - 1) // limit
+
+    return jsonify({
+        "patients": patient_list,
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "total_pages": total_pages
+        }
+    }), 200
 
 
 if __name__ == "__main__":
